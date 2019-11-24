@@ -1,0 +1,58 @@
+﻿@model SCMonitor.Models.MonitorModel
+
+<table class="table">
+    <thead>
+        <tr>
+            <td>識別名</td>
+            <td>ホスト名</td>
+            <td>ログインユーザー名</td>
+            <td>セッション種別</td>
+            <td>接続元ホスト名</td>
+        </tr>
+    </thead>
+    <tbody>
+        @foreach (var item in Model.data.DataList)
+        {
+            bool isUnknownStatus = ((DateTime.Now - item.CollectTime).TotalMinutes > Model.unknownStatusThresholdMinutes);
+            int rowSpan = isUnknownStatus ? 1 : item.Data.Sessions.Count;
+
+            if (isUnknownStatus)
+            {
+                <tr>
+                    <td>@item.Data.ReporterName</td>
+                    <td>@item.Data.ReporterHostName</td>
+                    <td colspan="3">不明</td>
+                </tr>
+
+            }
+            else if (item.Data.Sessions.Count == 0)
+            {
+                <tr>
+                    <td>@item.Data.ReporterName</td>
+                    <td>@item.Data.ReporterHostName</td>
+                    <td></td>
+                    <td></td>
+                    <td></td>
+                </tr>
+            }
+            else
+            {
+                <tr>
+                    <td rowspan="@item.Data.Sessions.Count">@item.Data.ReporterName</td>
+                    <td rowspan="@item.Data.Sessions.Count">@item.Data.ReporterHostName</td>
+                    <td>@item.Data.Sessions[0].UserName</td>
+                    <td>@item.Data.Sessions[0].SessionName</td>
+                    <td>@item.Data.Sessions[0].ClientName</td>
+                </tr>
+                for (int i = 1; i < item.Data.Sessions.Count; i++)
+                {
+                    <tr>
+                        <td>@item.Data.Sessions[i].UserName</td>
+                        <td>@item.Data.Sessions[i].SessionName</td>
+                        <td>@item.Data.Sessions[i].ClientName</td>
+                    </tr>
+                }
+            }
+        }
+    </tbody>
+</table>

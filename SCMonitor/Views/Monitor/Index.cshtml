@@ -1,0 +1,29 @@
+﻿@model SCMonitor.Models.MonitorModel
+
+@{
+    ViewBag.Title = "SCMonitor";
+}
+
+<h2>ログインセッションの一覧</h2>
+
+<div id="monitor-status">
+
+</div>
+
+<script>
+    function UpdateTable() {
+        $.ajax({
+            type: "GET",
+            url: "@Url.Action("GetTablePartial", "Monitor")",
+            success: function (html) {
+                $("#monitor-status").html(html);
+            },
+        });
+    }
+
+    $(function () {
+        UpdateTable();
+        setInterval(UpdateTable, 60000);
+    });
+</script>
+
