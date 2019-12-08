@@ -3,11 +3,15 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
-using SCCommon;
-using Newtonsoft.Json;
 using System.Net.Http;
 using Microsoft.Win32;
 using System.Net;
+using System.Diagnostics;
+using System.IO;
+using System.Reflection;
+
+using SCCommon;
+using Newtonsoft.Json;
 
 namespace SCReporter
 {
@@ -18,6 +22,13 @@ namespace SCReporter
             Success = 0,
             UnexpectedError = 1,
             CommunicateServerFailed = 2,
+            FailQueryUserCmd = 3,
+        }
+
+        public class UninstallInfo
+        {
+            public string DisplayName { get; set; }
+            public string DisplayVersion { get; set; }
         }
 
         static int Main(string[] args)
@@ -26,62 +37,26 @@ namespace SCReporter
             SCTracer.Info(method, "Start.");
             try
             {
-                // configファイルから設定を読み取る
+                // 送信データ1: Reporter実行マシンの情報: configファイルから設定を読み取る
                 string reporterName = System.Configuration.ConfigurationManager.AppSettings["ReporterName"];
                 string destinationURL = System.Configuration.ConfigurationManager.AppSettings["DestinationURL"];
-
-                // レジストリ情報を収集する
                 ReportData reportData = new ReportData();
                 reportData.ReporterName = reporterName;
                 reportData.ReporterHostName = System.Net.Dns.GetHostName();
-                foreach (string subkey in Registry.Users.GetSubKeyNames())
+
+                // 送信データ2: ログインセッション情報
+                List<ReportData.LoginSession> sessions;
+                ReportResult result = GetLoginSessions(out sessions);
+                if (result != ReportResult.Success)
                 {
-                    RegistryKey key = Registry.Users.OpenSubKey(subkey + @"\Volatile Environment");
-                    if (key == null || key.SubKeyCount == 0)
-                    {
-                        continue;
-                    }
-                    SCTracer.Info(method, "found login session: SID = " + subkey);
-                    RegistryKey volatileEnvironment = key.OpenSubKey(key.GetSubKeyNames()[0]);  // 1個しかないはずなので決め打ち
-                    string userName = (string)key.GetValue("USERNAME");
-                    string clientName = (string)volatileEnvironment.GetValue("CLIENTNAME");
-                    string sessionName = (string)volatileEnvironment.GetValue("SESSIONNAME");
-                    string ipAddress = HostToIPAddress(clientName);
-                    SCTracer.Info(method, string.Format("userName = {0}, clientName = {1}, sessionName = {2}, ipAddress = {3}", userName, clientName, sessionName, ipAddress));
-
-                    // RDPの場合は、本当にコネクションがあるか調べる。(切断してもレジストリに値が残り続けるため。)
-                    if (sessionName.ToLower().StartsWith("rdp"))
-                    {
-                        int rdpPort = 3389;
-                        RegistryKey rdpKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp");
-                        if (rdpKey != null)
-                        {
-                            int portTemp = (int)rdpKey.GetValue("PortNumber");
-                            if (portTemp > 0)
-                            {
-                                SCTracer.Info(method, "Get rdp-port from Registry.");
-                                rdpPort = portTemp;
-                            }
-                        }
-
-                        var connections = System.Net.NetworkInformation.IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpConnections();
-                        var connectInfo = connections.Where(x => x.LocalEndPoint.Port == rdpPort && x.State == System.Net.NetworkInformation.TcpState.Established)
-                            .FirstOrDefault(x => x.RemoteEndPoint.Address.ToString().Trim().ToLower() == ipAddress.Trim().ToLower());
-                        if (connectInfo == null)
-                        {
-                            SCTracer.Info(method, string.Format("Not found RDP connection on Port={0}, from {1}. Skip.", rdpPort, clientName));
-                            continue;
-                        }
-                    }
-
-                    // ホスト名(IPアドレス)の形式にして送信。
-                    if (!string.IsNullOrWhiteSpace(ipAddress))
-                    {
-                        clientName = string.Format("{0}({1})", clientName, ipAddress);
-                    }
-
-                    reportData.Sessions.Add(new ReportData.LoginSession() { ClientName =  clientName, SessionName = sessionName, UserName = userName});
+                    SCTracer.Error(method, "GetLoginSessions failed. result = " + result);
+                    return (int)result;
                 }
+                reportData.Sessions = sessions;
+
+                // 送信データ3：インストール済みソフトウェアを取得
+                string checkSoftwareNames = System.Configuration.ConfigurationManager.AppSettings["CheckSoftwareNames"];
+                reportData.Softwares = GetInstalledSoftwares(checkSoftwareNames.Split(new char[]{ ',' }, StringSplitOptions.RemoveEmptyEntries));
 
                 // 送信データをJsonにシリアライズし、送信する
                 string json = JsonConvert.SerializeObject(reportData);
@@ -107,6 +82,7 @@ namespace SCReporter
             return (int)ReportResult.Success;
         }
 
+        #region ログインSessionデータの作成
         static string HostToIPAddress(string hostname)
         {
             string method = "Reporter.HostToIPAddress";
@@ -148,6 +124,159 @@ namespace SCReporter
             }
         }
 
+        static ReportResult GetLoginSessions(out List<ReportData.LoginSession> sessions)
+        {
+            string method = "Reporter.GetLoginSessions";
+            SCTracer.Info(method, "Start.");
+            sessions = new List<ReportData.LoginSession>();
+
+            // 後のbat実行のために、exeのパスに移動しておく
+            string currentDirectory = Directory.GetCurrentDirectory();
+            Directory.SetCurrentDirectory(Path.GetDirectoryName(Assembly.GetEntryAssembly().Location));
+
+            // query user 実行
+            string queryResult;
+            string queryError;
+            using (Process proc = new Process())
+            {
+                proc.StartInfo.FileName = "query_user.bat";
+                proc.StartInfo.CreateNoWindow = true;
+                proc.StartInfo.UseShellExecute = false;
+                proc.StartInfo.RedirectStandardOutput = true;
+                proc.StartInfo.RedirectStandardError = true;
+
+                proc.Start();
+                queryResult = proc.StandardOutput.ReadToEnd();
+                queryError = proc.StandardError.ReadToEnd();
+                proc.WaitForExit();
+                SCTracer.Info(method, queryResult);
+                if (proc.ExitCode != 1)  // batファイルが見つからないなどの異常時、1以外になる
+                {
+                    SCTracer.Error(method, "query_result.bat exit with errorcode = " + proc.ExitCode + ". return " + ReportResult.FailQueryUserCmd);
+                    return ReportResult.FailQueryUserCmd;
+                }
+                if (string.IsNullOrWhiteSpace(queryResult))
+                {
+                    SCTracer.Error(method, "query_result.bat failed. StandardOutput is empty. return " + ReportResult.FailQueryUserCmd);
+                    SCTracer.Error(method, "StandardError:\n" + queryError);
+                    return ReportResult.FailQueryUserCmd;
+                }
+            }
+            string[] queryResultLines = queryResult.Split('\n');
+
+
+            for (int i = 1; i < queryResultLines.Length; i++) // 1行目はヘッダのためスキップ
+            {
+                string[] userData = queryResultLines[i].Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                if (userData.Length < 2)
+                {
+                    // 不正行はスキップ
+                    continue;
+                }
+                if (!userData[1].StartsWith("console") && !userData[1].StartsWith("rdp"))
+                {
+                    // RDP切断後など、Session名が空の場合対策
+                    continue;
+                }
+                if (userData[0].StartsWith(">"))
+                {
+                    // カレントセッションのユーザー名先頭には > が付く
+                    userData[0] = userData[0].Substring(1);
+                }
+                SCTracer.Info(method, "add session: " + userData[0] + ", " + userData[1]);
+                sessions.Add(new ReportData.LoginSession() { UserName = userData[0], SessionName = userData[1] });
+            }
+
+            // レジストリからCLIENTNAMEを探す
+            foreach (string subkey in Registry.Users.GetSubKeyNames())
+            {
+                RegistryKey key = Registry.Users.OpenSubKey(subkey + @"\Volatile Environment");
+                if (key == null || key.SubKeyCount == 0)
+                {
+                    continue;
+                }
+                RegistryKey volatileEnvironment = key.OpenSubKey(key.GetSubKeyNames()[0]);  // 1個しかないはずなので決め打ち
+                string userName = (string)key.GetValue("USERNAME");
+                string clientName = (string)volatileEnvironment.GetValue("CLIENTNAME");
+                string sessionName = (string)volatileEnvironment.GetValue("SESSIONNAME");
+
+                ReportData.LoginSession session = sessions.Find(x => x.UserName.ToLower() == userName.ToLower());
+                if (session != null)
+                {
+                    SCTracer.Info(method, "found login session: SID = " + subkey);
+                    session.ClientName = clientName;
+                    SCTracer.Info(method, string.Format("userName = {0}, clientName = {1}, sessionName = {2}", userName, clientName, sessionName));
+                }
+            }
+
+            Directory.SetCurrentDirectory(currentDirectory);
+            SCTracer.Info(method, "End.");
+            return ReportResult.Success;
+        }
+        #endregion
+
+        #region インストール済みソフトウェア一覧の作成
+        static List<ReportData.InstalledSoftware> GetInstalledSoftwares(string[] softwareNames)
+        {
+            string method = "Reporter.GetInstalledSoftwares";
+            SCTracer.Info(method, "Start. Softwares=[" + string.Join("],[", softwareNames) + "]");
+
+            List<ReportData.InstalledSoftware> ret = new List<ReportData.InstalledSoftware>();
+
+            // レジストリからアンインストール可能なソフトウェア一覧の取得
+            List<ReportData.InstalledSoftware> uninstallList = new List<ReportData.InstalledSoftware>();
+            uninstallList.AddRange(GetUinstallListFromRegistry(true));
+            uninstallList.AddRange(GetUinstallListFromRegistry(false));
+
+            // softwareNames で探索
+            ReportData.InstalledSoftware findSoftware;
+            foreach (string item in softwareNames)
+            {
+                SCTracer.Info(method, "find " + item + " ...");
+                // configに記載されたソフトウェア名があるか調べる
+                findSoftware = uninstallList.Find(x => x.SoftwareName.Trim().ToLower() == item.Trim().ToLower());
+                if (findSoftware != null)
+                {
+                    SCTracer.Info(method, "FOUND: version = " + findSoftware.Version);
+                    ret.Add(findSoftware);
+                }
+            }
+
+            SCTracer.Info(method, "End.");
+            return ret;
+        }
+
+        static List<ReportData.InstalledSoftware> GetUinstallListFromRegistry(bool is32bit)
+        {
+            List<ReportData.InstalledSoftware> uninstallList = new List<ReportData.InstalledSoftware>();
+
+            RegistryKey baseKey;
+            if (is32bit)
+            {
+                baseKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry32);
+            }
+            else
+            {
+                // これはプロセスが64bitじゃないと、RegistryView.Registry32と同じ結果を取ってくる
+                baseKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
+            }
+            RegistryKey uninstallKey = baseKey.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall");
+            if (uninstallKey != null)
+            {
+                foreach (string subKey in uninstallKey.GetSubKeyNames())
+                {
+                    RegistryKey appkey = uninstallKey.OpenSubKey(subKey, false);
+                    string appName = (string)appkey.GetValue("DisplayName") ?? subKey;
+                    string appVersion = (string)appkey.GetValue("DisplayVersion") ?? string.Empty;
+                    uninstallList.Add(new ReportData.InstalledSoftware() { SoftwareName = appName, Version = appVersion });
+                }
+            }
+            return uninstallList;
+        }
+
+        #endregion
+
+        #region Jsonのサーバーに送信
         async static Task ReportJson(string json, string url)
         {
             string method = "Reporter.ReportJson";
@@ -167,5 +296,6 @@ namespace SCReporter
 
             SCTracer.Info(method, "End.");
         }
+        #endregion
     }
 }
