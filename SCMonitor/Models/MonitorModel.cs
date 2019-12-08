@@ -14,6 +14,7 @@ namespace SCMonitor.Models
         public Common.CollectDataList data = new Common.CollectDataList();
         private static Mutex mutex = new Mutex(false, Common.JSON_MUTEX_NAME);
         public int unknownStatusThresholdMinutes = 60;
+        public List<string> monitorSoftwareNames = new List<string>();
 
         public MonitorModel(string filePath)
         {
@@ -24,6 +25,13 @@ namespace SCMonitor.Models
             if (!int.TryParse(value, out unknownStatusThresholdMinutes))
             {
                 SCTracer.Error(method, "UnknownStatusThresholdMinutes: failed to parse " + value + " to int.");
+            }
+
+            value = System.Configuration.ConfigurationManager.AppSettings["MonitorSoftwareNames"];
+            monitorSoftwareNames = value.Split(new char[] { ',' }, StringSplitOptions.RemoveEmptyEntries).ToList();
+            for (int i = 0; i < monitorSoftwareNames.Count; i++)
+            {
+                monitorSoftwareNames[i] = monitorSoftwareNames[i].Trim();
             }
 
             try

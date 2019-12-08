@@ -6,8 +6,9 @@
             <td>識別名</td>
             <td>ホスト名</td>
             <td>ログインユーザー名</td>
-            <td>セッション種別</td>
+            <td>セッション名</td>
             <td>接続元ホスト名</td>
+            <td>インストールソフトウェア</td>
         </tr>
     </thead>
     <tbody>
@@ -21,7 +22,7 @@
                 <tr>
                     <td>@item.Data.ReporterName</td>
                     <td>@item.Data.ReporterHostName</td>
-                    <td colspan="3">不明</td>
+                    <td colspan="4">不明</td>
                 </tr>
 
             }
@@ -30,6 +31,7 @@
                 <tr>
                     <td>@item.Data.ReporterName</td>
                     <td>@item.Data.ReporterHostName</td>
+                    <td></td>
                     <td></td>
                     <td></td>
                     <td></td>
@@ -43,6 +45,13 @@
                     <td>@item.Data.Sessions[0].UserName</td>
                     <td>@item.Data.Sessions[0].SessionName</td>
                     <td>@item.Data.Sessions[0].ClientName</td>
+                    <td rowspan="@item.Data.Sessions.Count">
+                        @foreach (var str in item.Data.ToDisplaySoftwareList(Model.monitorSoftwareNames))
+                        {
+                            <text>@str</text>
+                            <br />
+                        }
+                    </td>
                 </tr>
                 for (int i = 1; i < item.Data.Sessions.Count; i++)
                 {
